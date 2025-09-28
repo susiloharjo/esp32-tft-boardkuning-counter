@@ -293,7 +293,14 @@ void GT911_Scan(void)
   uint8_t Clearbuf = 0;
   uint8_t i;
   static unsigned long lastDebugTime = 0;
-  static bool debugEnabled = true;
+  static unsigned long lastScanTime = 0;
+  static const unsigned long SCAN_INTERVAL_MS = 20; // Limit scanning to 50Hz max
+  
+  // Throttle scanning to prevent excessive I2C communication
+  if (millis() - lastScanTime < SCAN_INTERVAL_MS) {
+    return;
+  }
+  lastScanTime = millis();
   
   if (1)
     // if (Dev_Now.Touch == 1)
@@ -478,12 +485,21 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
     static unsigned long lastTouchDebug = 0;
     static bool lastTouched = false;
     static unsigned long lastCallbackDebug = 0;
+    static unsigned long lastTouchTime = 0;
+    static const unsigned long TOUCH_DEBOUNCE_MS = 150; // Debounce time to prevent double clicks
 
     // Debug: Print when callback is called every 10 seconds (reduced frequency)
     if (millis() - lastCallbackDebug > 10000) {
         Serial.printf("my_touchpad_read callback called, touched=%d\r\n", touched);
         lastCallbackDebug = millis();
     }
+
+    // Throttle touch scanning to prevent double clicks
+    if (millis() - lastTouchTime < 50) { // 20 FPS max for touch scanning
+        data->state = lastTouched ? LV_INDEV_STATE_PR : LV_INDEV_STATE_REL;
+        return;
+    }
+    lastTouchTime = millis();
 
     GT911_Scan();
     
@@ -494,22 +510,31 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
             lastTouched = false;
         }
      } else {
-         /*Set the coordinates - full width touch coverage*/
-         // Make touch area cover 100% of screen width
-         // Large offset to map touch panel to full display width
-         data->point.x = Dev_Now.X[0] + 100;  // Much larger offset for full width coverage
-         data->point.y = Dev_Now.Y[0];        // Use raw Y coordinate
+         // Debounce touch to prevent double clicks
+         static unsigned long lastValidTouch = 0;
+         if (millis() - lastValidTouch < TOUCH_DEBOUNCE_MS) {
+             data->state = LV_INDEV_STATE_REL;
+             return;
+         }
+         lastValidTouch = millis();
+
+         /*Set the coordinates - adjust based on actual touch coordinates*/
+         // Based on user feedback: touch area is still above button, need to shift down more
+         // Touch area should be on the button itself, not above it
+         data->point.x = Dev_Now.X[0] + 110;  // Keep X offset
+         data->point.y = Dev_Now.Y[0] + 80;   // Increase Y offset to shift touch down more to button
          data->state = LV_INDEV_STATE_PR;
         
          // Print LVGL touch data only when starting touch (reduced frequency)
          if (!lastTouched) {
              Serial.printf("LVGL Touch: X=%d, Y=%d, State=%d\r\n", data->point.x, data->point.y, data->state);
-             // Check if touch is in button area (button is centered, size 150x80)
-             // With +100px X offset, button center shifts: 160+100=260, so area is 185-335, 200-280
-             if (data->point.x >= 185 && data->point.x <= 335 && data->point.y >= 200 && data->point.y <= 280) {
+             // Check if touch is in button area (adjusted with larger Y offset)
+             // With Y offset +80, button area shifts down more
+             // Button area should be around X=85-235, Y=227-307
+             if (data->point.x >= 85 && data->point.x <= 235 && data->point.y >= 227 && data->point.y <= 307) {
                  Serial.printf("Touch is in button area! Will trigger button click.\r\n");
              } else {
-                 Serial.printf("Touch is OUTSIDE button area. Button area: X=185-335, Y=200-280\r\n");
+                 Serial.printf("Touch is OUTSIDE button area. Button area: X=85-235, Y=227-307\r\n");
                  Serial.printf("Raw touch: X=%d, Y=%d -> Adjusted: X=%d, Y=%d\r\n", Dev_Now.X[0], Dev_Now.Y[0], data->point.x, data->point.y);
              }
              Serial.printf("Touch started\r\n");
@@ -521,19 +546,25 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
 // Button click event handler
 static void btn_event_cb(lv_event_t *e) {
     lv_event_code_t code = lv_event_get_code(e);
+    static unsigned long lastClickTime = 0;
+    static const unsigned long CLICK_DEBOUNCE_MS = 200; // Prevent double clicks
+    
     Serial.printf("Button event received: %d\r\n", code);
     
-    // LVGL v8 event codes
+    // Only respond to CLICKED event and add debouncing
     if (code == LV_EVENT_CLICKED) {  // LV_EVENT_CLICKED = 1
+        // Debounce to prevent double clicks
+        if (millis() - lastClickTime < CLICK_DEBOUNCE_MS) {
+            Serial.printf("Click ignored - too fast (debounce)\r\n");
+            return;
+        }
+        lastClickTime = millis();
+        
         counter++;
-        lv_label_set_text_fmt(counter_label, "Count: %d", counter);
+        lv_label_set_text_fmt(counter_label, "%d", counter);
         Serial.printf("Button clicked! Counter: %d\r\n", counter);
-    } else if (code == LV_EVENT_PRESSED) {  // LV_EVENT_PRESSED = 0
-        counter++;
-        lv_label_set_text_fmt(counter_label, "Count: %d", counter);
-        Serial.printf("Button pressed! Counter: %d\r\n", counter);
     } else {
-        Serial.printf("Button event code: %d (not CLICKED or PRESSED)\r\n", code);
+        Serial.printf("Button event code: %d (ignored - only CLICKED events processed)\r\n", code);
     }
 }
 
@@ -585,15 +616,15 @@ void setup() {
 
     // Create counter label
     counter_label = lv_label_create(scr);
-    lv_label_set_text_fmt(counter_label, "Count: %d", counter);
+    lv_label_set_text_fmt(counter_label, "%d", counter);
     lv_obj_set_style_text_color(counter_label, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(counter_label, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_align(counter_label, LV_ALIGN_CENTER, 0, -50);
+    lv_obj_set_style_text_font(counter_label, &lv_font_montserrat_48, LV_PART_MAIN);
+    lv_obj_align(counter_label, LV_ALIGN_CENTER, 0, -80);
 
      // Create button
      lv_obj_t *btn = lv_btn_create(scr);
      lv_obj_set_size(btn, 150, 80);  // Made bigger for easier touch
-     lv_obj_align(btn, LV_ALIGN_CENTER, 0, 0);
+     lv_obj_align(btn, LV_ALIGN_CENTER, 0, 40);
      lv_obj_add_event_cb(btn, btn_event_cb, LV_EVENT_ALL, NULL);
     
     // Make button more visible with bright color
@@ -604,6 +635,8 @@ void setup() {
     lv_obj_get_coords(btn, &btn_area);
     Serial.printf("Button created at: X=%d, Y=%d, Width=%d, Height=%d\r\n", 
                   btn_area.x1, btn_area.y1, btn_area.x2 - btn_area.x1, btn_area.y2 - btn_area.y1);
+    Serial.printf("Button area: X=%d-%d, Y=%d-%d\r\n", 
+                  btn_area.x1, btn_area.x2, btn_area.y1, btn_area.y2);
 
     // Create button label
     lv_obj_t *btn_label = lv_label_create(btn);
