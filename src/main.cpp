@@ -493,22 +493,28 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
             Serial.printf("Touch released\r\n");
             lastTouched = false;
         }
-    } else {
-        /*Set the coordinates*/
-        data->point.x = Dev_Now.X[0];
-        data->point.y = Dev_Now.Y[0];
-        data->state = LV_INDEV_STATE_PR;
+     } else {
+         /*Set the coordinates - full width touch coverage*/
+         // Make touch area cover 100% of screen width
+         // Large offset to map touch panel to full display width
+         data->point.x = Dev_Now.X[0] + 100;  // Much larger offset for full width coverage
+         data->point.y = Dev_Now.Y[0];        // Use raw Y coordinate
+         data->state = LV_INDEV_STATE_PR;
         
-        // Print LVGL touch data only when starting touch (reduced frequency)
-        if (!lastTouched) {
-            Serial.printf("LVGL Touch: X=%d, Y=%d, State=%d\r\n", data->point.x, data->point.y, data->state);
-            // Check if touch is in button area (button is centered, size 120x50)
-            if (data->point.x >= 100 && data->point.x <= 220 && data->point.y >= 215 && data->point.y <= 265) {
-                Serial.printf("Touch is in button area!\r\n");
-            }
-            Serial.printf("Touch started\r\n");
-            lastTouched = true;
-        }
+         // Print LVGL touch data only when starting touch (reduced frequency)
+         if (!lastTouched) {
+             Serial.printf("LVGL Touch: X=%d, Y=%d, State=%d\r\n", data->point.x, data->point.y, data->state);
+             // Check if touch is in button area (button is centered, size 150x80)
+             // With +100px X offset, button center shifts: 160+100=260, so area is 185-335, 200-280
+             if (data->point.x >= 185 && data->point.x <= 335 && data->point.y >= 200 && data->point.y <= 280) {
+                 Serial.printf("Touch is in button area! Will trigger button click.\r\n");
+             } else {
+                 Serial.printf("Touch is OUTSIDE button area. Button area: X=185-335, Y=200-280\r\n");
+                 Serial.printf("Raw touch: X=%d, Y=%d -> Adjusted: X=%d, Y=%d\r\n", Dev_Now.X[0], Dev_Now.Y[0], data->point.x, data->point.y);
+             }
+             Serial.printf("Touch started\r\n");
+             lastTouched = true;
+         }
     }
 }
 
@@ -516,10 +522,18 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
 static void btn_event_cb(lv_event_t *e) {
     lv_event_code_t code = lv_event_get_code(e);
     Serial.printf("Button event received: %d\r\n", code);
-    if (code == LV_EVENT_CLICKED) {
+    
+    // LVGL v8 event codes
+    if (code == LV_EVENT_CLICKED) {  // LV_EVENT_CLICKED = 1
         counter++;
         lv_label_set_text_fmt(counter_label, "Count: %d", counter);
         Serial.printf("Button clicked! Counter: %d\r\n", counter);
+    } else if (code == LV_EVENT_PRESSED) {  // LV_EVENT_PRESSED = 0
+        counter++;
+        lv_label_set_text_fmt(counter_label, "Count: %d", counter);
+        Serial.printf("Button pressed! Counter: %d\r\n", counter);
+    } else {
+        Serial.printf("Button event code: %d (not CLICKED or PRESSED)\r\n", code);
     }
 }
 
@@ -534,7 +548,7 @@ void setup() {
     
     // Initialize TFT display
     tft.init();
-    tft.setRotation(0);
+    tft.setRotation(2);  // 180° rotation to match touch orientation
     tft.fillScreen(TFT_BLACK);
 
     // Initialize LVGL
@@ -545,8 +559,8 @@ void setup() {
 
     // Initialize display
     lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res = 320;
-    disp_drv.ver_res = 480;
+    disp_drv.hor_res = 320;  // Rotated display: width becomes height
+    disp_drv.ver_res = 480;  // Rotated display: height becomes width
     disp_drv.flush_cb = my_disp_flush;
     disp_drv.draw_buf = &draw_buf;
     lv_disp_drv_register(&disp_drv);
@@ -576,11 +590,11 @@ void setup() {
     lv_obj_set_style_text_font(counter_label, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_align(counter_label, LV_ALIGN_CENTER, 0, -50);
 
-    // Create button
-    lv_obj_t *btn = lv_btn_create(scr);
-    lv_obj_set_size(btn, 120, 50);
-    lv_obj_align(btn, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_add_event_cb(btn, btn_event_cb, LV_EVENT_ALL, NULL);
+     // Create button
+     lv_obj_t *btn = lv_btn_create(scr);
+     lv_obj_set_size(btn, 150, 80);  // Made bigger for easier touch
+     lv_obj_align(btn, LV_ALIGN_CENTER, 0, 0);
+     lv_obj_add_event_cb(btn, btn_event_cb, LV_EVENT_ALL, NULL);
     
     // Make button more visible with bright color
     lv_obj_set_style_bg_color(btn, lv_color_hex(0xFF0000), LV_PART_MAIN);
@@ -608,18 +622,10 @@ void setup() {
 }
 
 void loop() {
-    static unsigned long lastAutoIncrement = 0;
-    
     GT911_Scan();  // Scan for touch input
     lv_timer_handler();  // Handle LVGL tasks
     
-    // Auto-increment counter every 5 seconds for testing
-    if (millis() - lastAutoIncrement > 5000) {
-        counter++;
-        lv_label_set_text_fmt(counter_label, "Count: %d", counter);
-        Serial.printf("Auto-increment: Counter = %d\r\n", counter);
-        lastAutoIncrement = millis();
-    }
+    // Counter only increments on button click - no auto-increment
     
     delay(1);  // Minimal delay for better responsiveness
 }
